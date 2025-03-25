@@ -1,0 +1,10 @@
+LICENSE
+README.md
+pyproject.toml
+src/__init__.py
+src/save_json.py
+src/surfridetools.py
+src/surfridetools.egg-info/PKG-INFO
+src/surfridetools.egg-info/SOURCES.txt
+src/surfridetools.egg-info/dependency_links.txt
+src/surfridetools.egg-info/top_level.txt
