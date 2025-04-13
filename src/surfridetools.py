@@ -1,345 +1,264 @@
 import os
 import struct
-from dataclasses import MISSING, dataclass, field
-from io import BufferedReader
-from typing import Any, List
+from enum import IntEnum
+from io import BytesIO
+
+from bidict import bidict
 
 from save_json import NoIndent
 
 
-class Variable:
-    def __init__(self, map: dict):
-        self.input_map = map
-        self.output_map = dict()
+class PropertyType(IntEnum):
+    None_ = 0x00  # 0 bytes
+    Bool = 0x01
+    AnsiString = 0x02  # n bytes
+    Char = 0x03
+    UChar = 0x04
+    Short = 0x05
+    UShort = 0x06
+    ShortAngle = 0x07
+    Long = 0x08
+    ULong = 0x09
+    Float = 0x0A
+    Angle = 0x0B
+    ARGB8888 = 0x0C
+    Double = 0x0D
+    ArraySeparator = 0x0E  # 0 bytes
 
-def metadata_field(default_val: Any, header_bytes: bytes, format: str, length: int = 0, factory = MISSING) -> Any:
-    if isinstance(default_val, list) and factory is MISSING:
-        return field(default_factory=lambda: default_val.copy(), metadata={"header": header_bytes, "format": format, "length": length})
-    elif factory is not MISSING:
-        return field(default_factory=factory, metadata={"header": header_bytes, "format": format, "length": length})
-    else:
-        return field(default=default_val, metadata={"header": header_bytes, "format": format, "length": length})
+    IllegalType = 0x0F
 
-@dataclass
-class PROJ:
-    SceneCount: int = metadata_field(-1, b'\x00\x06', '<H')
-    TexListCount: int = metadata_field(-1, b'\x01\x06', '<H')
-    FontCount: int = metadata_field(-1, b'\x05\x06', '<H')
-    StartFrame: int = metadata_field(-1, b'\x55\x08', '<I')
-    EndFrame: int = metadata_field(-1, b'\x56\x08', '<I')
+SRD_DICT = bidict({
+    0x00: ("SceneCount", PropertyType.UShort),
+    0x01: ("TexListCount", PropertyType.UShort),
+    0x03: ("Name", PropertyType.AnsiString),
+    0x04: ("BackColor", PropertyType.ARGB8888),
+    0x05: ("FontCount", PropertyType.UShort),
+    0x06: ("CommentLength", PropertyType.Short),
+    0x0E: ("AttributeCount", PropertyType.UShort),
+    0x10: ("LayerCount", PropertyType.UShort),
+    0x11: ("CameraCount", PropertyType.UShort),
+    0x12: ("PositionXYZ", PropertyType.Float),
+    0x13: ("TargetXYZ", PropertyType.Float),
+    0x14: ("FovY", PropertyType.Angle),
+    0x15: ("ZNear", PropertyType.Float),
+    0x16: ("ZFar", PropertyType.Float),
+    0x20: ("Flags", PropertyType.ULong),
+    0x21: ("CastCount", PropertyType.UShort),
+    0x22: ("AnimationCount", PropertyType.UShort),
+    0x30: ("Flags2", PropertyType.ULong),
+    0x31: ("TranslationXY", PropertyType.Float),
+    0x32: ("RotationZ", PropertyType.Angle),
+    0x33: ("Scale", PropertyType.Float),
+    0x37: ("MaterialColorRGBA", PropertyType.ARGB8888),
+    0x38: ("IlluminationColorRGBA", PropertyType.ARGB8888),
+    0x39: ("VertexColorRGBA", PropertyType.ARGB8888),
+    0x3A: ("Display", PropertyType.Bool),
+    0x3B: ("Child", PropertyType.Short),
+    0x3C: ("Sibling", PropertyType.Short),
+    0x3D: ("MultiPosFlags", PropertyType.UShort),
+    0x3E: ("MultiSizeFlags", PropertyType.UShort),
+    0x40: ("Width", PropertyType.UShort),
+    0x41: ("Height", PropertyType.UShort),
+    0x42: ("PivotX", PropertyType.Float),
+    0x43: ("PivotY", PropertyType.Float),
+    0x44: ("CropRefCount", PropertyType.UShort),
+    0x45: ("CropIndex", PropertyType.Short),
+    0x48: ("ImageCastFlags", PropertyType.ULong),
+    0x49: ("CropRef", PropertyType.Short),
+    0x50: ("MotionCount", PropertyType.UShort),
+    0x51: ("CastIndex", PropertyType.UShort),
+    0x52: ("TrackCount", PropertyType.UShort),
+    0x53: ("TrackType", PropertyType.UShort),
+    0x54: ("Flags3", PropertyType.ULong),
+    0x55: ("StartFrame", PropertyType.Long),
+    0x56: ("EndFrame", PropertyType.Long),
+    0x57: ("KeyCount", PropertyType.UShort),
+    0x58: ("FirstFrame", PropertyType.Long),
+    0x59: ("LastFrame", PropertyType.Long),
+    0x5A: ("KeyFrame", PropertyType.Long),
+    0x5B: ("KeyValue", PropertyType.Long),
+    0x5C: ("Interpolation", PropertyType.UShort),
+    0x5D: ("InParam", PropertyType.Float),
+    0x5E: ("OutParam", PropertyType.Float),
+    0x60: ("LayerCount2", PropertyType.UShort),
+    0x61: ("TextureFileName", PropertyType.AnsiString),
+    0x62: ("TextureFlags", PropertyType.ULong),
+    0x63: ("CropCount", PropertyType.UShort),
+    0x65: ("Rectangle", PropertyType.Short),
+})
 
-@dataclass
-class SCN:
-    Name: str = metadata_field("", b'\x03\x02', 'string')
-    LayerCount: int = metadata_field(-1, b'\x10\x06', '<H')
-    CameraCount: int = metadata_field(-1, b'\x11\x06', '<H')
-    BackColor: tuple = metadata_field((-1, -1, -1, -1), b'\x04\x0C', '4B')
-    Width: int = metadata_field(-1, b'\x40\x06', '<H')
-    Height: int = metadata_field(-1, b'\x41\x06', '<H')
-
-@dataclass
-class LAYR:
-    Name: str = metadata_field("", b'\x03\x02', 'string')
-    Flags: int = metadata_field(-1, b'\x20\x09', '<I')
-    CastCount: int = metadata_field(-1, b'\x21\x06', '<H')
-    AnimationCount: int = metadata_field(-1, b'\x22\x06', '<H')
-
-@dataclass
-class NODE:
-    Name: str = metadata_field("", b'\x03\x02', 'string')
-    Flags: int = metadata_field(-1, b'\x30\x09', '<I')
-    Child: int = metadata_field(-1, b'\x3B\x05', '<h')
-    Sibling: int = metadata_field(-1, b'\x3C\x05', '<h')
-
-@dataclass
-class TRS2:
-    TranslationXY: tuple = metadata_field((-1, -1), b'\x31\x4A\x00', '<ff')
-    RotationZ: int = metadata_field(-1, b'\x32\x0B', '<I')
-    Scale: tuple = metadata_field((-1, -1), b'\x33\x4A\x00', '<ff')
-    Display: bool = metadata_field(False, b'\x3A\x01', '<?')
-    MaterialColorRGBA: tuple = metadata_field((-1, -1, -1, -1), b'\x37\x0C', '4B')
-    IlluminationColorRGBA: tuple = metadata_field((-1, -1, -1, -1), b'\x38\x0C', '4B')
-    VertexColorRGBA: List[tuple] = metadata_field([], b'\x39\x0C', '4B', 4, lambda: [(-1, -1, -1, -1)])
-    MultiPosFlags: int = metadata_field(-1, b'\x3D\x06', '<H')
-    MultiSizeFlags: int = metadata_field(-1, b'\x3E\x06', '<H')
-
-@dataclass
-class CIMG:
-    ImageCastFlags: int = metadata_field(-1, b'\x48\x09', '<I')
-    CastIndex: int = metadata_field(-1, b'\x51\x06', '<H')
-    Width: int = metadata_field(-1.0, b'\x40\x0A', '<f')
-    Height: int = metadata_field(-1.0, b'\x41\x0A', '<f')
-    PivotX: int = metadata_field(-1.0, b'\x42\x0A', '<f')
-    PivotY: int = metadata_field(-1.0, b'\x43\x0A', '<f')
-    CropIndex: List[int] = metadata_field([], b'\x45\x05', '<H', 2, factory=lambda: [(-1, -1, -1, -1)])
-    CropRefCount: List[int] = metadata_field([], b'\x44\x06', '<H', 2, factory=lambda: [(-1, -1, -1, -1)])
-
-@dataclass
-class CREF:
-    TextureListIndexOld: int = metadata_field(0, b'\x49\x45\01', 'B')
-    TextureListIndexConvert: int = metadata_field(0, b'', 'B')
-    TextureIndex: int = metadata_field(-1, b'', '<H')
-    CropIndex: int = metadata_field(-1, b'', '<H')
-
-@dataclass
-class ANIM:
-    MotionCount: int = metadata_field(-1, b'\x50\x06', '<H')
-    Name: str = metadata_field('', b'\x03\x02', 'string')
-    EndFrame: int = metadata_field(-1, b'\x56\x08', '<I')
-
-@dataclass
-class MOT:
-    CastIndex: int = metadata_field(-1, b'\x51\x05', '<H')
-    TrackCount: int = metadata_field(-1, b'\x52\x06', '<H')
-
-@dataclass
-class TRK:
-    TrackType: int = metadata_field(-1, b'\x53\x06', '<H')
-    KeyCount: int = metadata_field(-1, b'\x57\x06', '<H')
-    Flags: int = metadata_field(-1, b'\x54\x09', '<I')
-    FirstFrame: int = metadata_field(-1, b'\x58\x08', '<I')
-    LastFrame: int = metadata_field(-1, b'\x59\x08', '<I')
-
-@dataclass
-class KEY:
-    KeyFrame: int = metadata_field(-1, b'\x5A\x08', '<I')
-    KeyData: Variable = Variable({
-                    347: ("KeyValue", "B"),
-                    1628: ("Interpolation", "<H"),
-                    2139: ("KeyValue", "<I"),
-                    2651: ("KeyValue", "<f"),
-                    2653: ("InParam", "<I"),
-                    2654: ("OutParam", "<I"),
-                    2907: ("KeyValue", "<i"),
-                    3163: ("KeyValue_Color_RGBA", "4B"),
-                })
-
-@dataclass
-class TEXL:
-    Name: str = metadata_field('', b'\x03\x02', 'string')
-    LayerCount: int = metadata_field(-1, b'\x60\x06', '<H')
-
-@dataclass
-class TEX:
-    TextureFlags: int = metadata_field(-1, b'\x62\x09', '<I')
-    TextureFileName: str = metadata_field('', b'\x61\x02', 'string')
-    Width: int = metadata_field(-1, b'\x40\x06', '<H')
-    Height: int = metadata_field(-1, b'\x41\x06', '<H')
-    CropCount: int = metadata_field(-1, b'\x63\x06', '<H')
-
-@dataclass
-class CROP:
-    Rectangle: tuple = metadata_field((-1, -1, -1, -1), b'\x65\x45\x02', '<HHHH')
-
-@dataclass
-class CAM:
-    Name: str = metadata_field('', b'\x03\x02', 'string')
-    PositionXYZ: tuple = metadata_field((-1, -1, -1), b'\x12\x4A\x01', '<fff')
-    TargetXYZ: tuple = metadata_field((-1, -1, -1), b'\x13\x4A\x01', '<fff')
-    FovY: int = metadata_field(-1, b'\x14\x0B', '<I')
-    ZNear: int = metadata_field(-1, b'\x15\x0A', '<f')
-    ZFar: int = metadata_field(-1, b'\x16\x0A', '<f')
-
-class ChunkProcessor:
-    def __init__(self):
-        self.json_dict = dict()
-        self.current_scene = dict()
-        self.current_layer = dict()
-        self.current_data = dict()
-        self.current_cimg = dict()
-        self.crop_ref_count = -1
-        self.current_anim = dict()
-        self.current_motion = dict()
-        self.current_trk = dict()
-        self.current_texl = dict()
-        self.current_tex = dict()
-
-    def get_dict(self):
-        return self.json_dict
-
-    def process_PROJ(self, file: BufferedReader, chunk_size: int) -> None:
-        data = process_fields(file, PROJ())
-        data["Scene"] = []
-        self.json_dict = {"Project": data}
-
-    def process_SCN(self, file: BufferedReader, chunk_size: int) -> None:
-        self.current_scene = process_fields(file, SCN())
-        self.json_dict["Project"]["Scene"].append(self.current_scene)
-        self.current_scene["Layer"] = []
-
-    def process_LAYR(self, file: BufferedReader, chunk_size: int) -> None:
-        self.current_layer = process_fields(file, LAYR())
-        self.current_scene["Layer"].append(self.current_layer)
-
-    def process_CAST(self, file: BufferedReader, chunk_size: int) -> None:
-        self.current_layer["Cast"] = []
-
-    def process_NODE(self, file: BufferedReader, chunk_size: int) -> None:
-        current_offset = file.tell()
-        nodes = dict()
-        nodes["Node"] = []
-        validate_header(file.read(2), b'\xFC\x00')
-        while file.tell() != current_offset + chunk_size:
-            data = process_fields(file, NODE())
-            validate_header(file.read(2), b'\x06\x05')
-            validate_header(file.read(2), b'\x00\x00')
-            if file.tell() == current_offset + chunk_size - 2:
-                validate_header(file.read(2), b'\xFD\x00')
-            else:
-                validate_header(file.read(2), b'\xFE\x00')
-            nodes["Node"].append(data)
-        self.current_layer["Cast"].append(nodes)
-
-    def process_TRS2(self, file: BufferedReader, chunk_size: int) -> None:
-        current_offset = file.tell()
-        trs2 = dict()
-        trs2["Transform2D"] = []
-        validate_header(file.read(2), b'\xFC\x00')
-        while file.tell() != current_offset + chunk_size:
-            data = process_fields(file, TRS2())
-            if file.tell() == current_offset + chunk_size - 2:
-                validate_header(file.read(2), b'\xFD\x00')
-            else:
-                validate_header(file.read(2), b'\xFE\x00')
-            trs2["Transform2D"].append(data)
-        self.current_layer["Cast"].append(trs2)
-
-    def process_DATA(self, file: BufferedReader, chunk_size: int) -> None:
-        self.current_data["CastData"] = []
-        self.current_layer["Cast"].append(self.current_data)
-
-    def process_CSLI(self, file: BufferedReader, chunk_size: int) -> None:
-        file.read(chunk_size)
-
-    def process_CIMG(self, file: BufferedReader, chunk_size: int) -> None:
-        self.current_cimg["ImageCastData"] = []
-        data = process_fields(file, CIMG())
-        data["CropIndex"] = NoIndent(data["CropIndex"])
-        self.current_cimg["ImageCastData"].append(data)
-        self.current_data["CastData"].append(self.current_cimg)
-        self.crop_ref_count = data["CropRefCount"][0]
-
-    def process_TEXT(self, file: BufferedReader, chunk_size: int) -> None:
-        file.read(chunk_size)
-
-    def process_CREF(self, file: BufferedReader, chunk_size: int) -> None:
-        cref = dict()
-        cref["CropRef"] = []
-        for i in range(self.crop_ref_count):
-            data = process_fields(file, CREF())
-            cref["CropRef"].append(data)
-        self.current_cimg["ImageCastData"].append(cref)
-
-    def process_NCAT(self, file: BufferedReader, chunk_size: int) -> None:
-        file.read(chunk_size)
-        self.current_layer["Animation"] = []
-
-    def process_CATR(self, file: BufferedReader, chunk_size: int) -> None:
-        file.read(chunk_size)
-
-    def process_ANIM(self, file: BufferedReader, chunk_size: int) -> None:
-        data = process_fields(file, ANIM())
-        self.current_layer["Animation"].append(data)
-        self.current_anim = data
-        self.current_anim["Motion"] = []
-
-    def process_MOT(self, file: BufferedReader, chunk_size: int) -> None:
-        data = process_fields(file, MOT())
-        self.current_anim["Motion"].append(data)
-        self.current_motion = data
-        self.current_motion["Track"] = []
-
-    def process_TRK(self, file: BufferedReader, chunk_size: int) -> None:
-        data = process_fields(file, TRK())
-        self.current_motion["Track"].append(data)
-        self.current_trk = data
-        self.current_trk["Key"] = []
-
-    def process_KEY(self, file: BufferedReader, chunk_size: int) -> None:
-        key_count = self.current_trk["KeyCount"]
-        for i in range(key_count):
-            data = process_fields(file, KEY())
-            self.current_trk["Key"].append(data)
-
-    def process_TEXL(self, file: BufferedReader, chunk_size: int) -> None:
-        self.json_dict["Project"]["TexList"] = []
-        data = process_fields(file, TEXL())
-        self.json_dict["Project"]["TexList"].append(data)
-        self.current_texl = data
-        self.current_texl["Texture"] = []
-
-    def process_TEX(self, file: BufferedReader, chunk_size: int) -> None:
-        data = process_fields(file, TEX())
-        self.current_texl["Texture"].append(data)
-        self.current_tex = data
-        self.current_tex["Crop"] = []
-
-    def process_CROP(self, file: BufferedReader, chunk_size: int) -> None:
-        for i in range(self.current_tex["CropCount"]):
-            data = process_fields(file, CROP())
-            self.current_tex["Crop"].append(data)
-
-    def process_CAM(self, file: BufferedReader, chunk_size: int) -> None:
-        self.json_dict["Project"]["Camera"] = process_fields(file, CAM())
+CHILD_MAPPING = bidict({
+    "SRCK": "SurfBoard",
+    "PROJ": "Project",
+    "SCN ": "Scene",
+    "TEX ": "Texture",
+    "TEXL": "TexList",
+    "CROP": "Crop",
+    "CAM ": "Camera",
+    "FONT": "Font",
+    "CHAR": "Character",
+    "LAYR": "Layer",
+    "CAST": "Cast",
+    "ANIM": "Animation",
+    "MOT ": "Motion",
+    "TRK ": "Track",
+    "KEY ": "Key",
+    "CIMG": "CropImage",
+    "CREF": "CropR",
+    "TRS2": "Transform2D",
+    "TRS3": "Transform3D",
+    "NODE": "Node",
+    "DATA": "CastData",
+    "NCAT": "NodeCast",
+})
+DATA_MAP = {
+    PropertyType.Bool: '?',
+    PropertyType.Short: 'h',
+    PropertyType.UShort: 'H',
+    PropertyType.Long: 'i',
+    PropertyType.ULong: 'I',
+    PropertyType.Float: 'f',
+    PropertyType.Double: 'd',
+    PropertyType.ARGB8888: '4B',
+    PropertyType.Angle: 'I',
+    PropertyType.AnsiString: 'string',
+}
 
 def bytes_to_hex(byte_string: bytes) -> str:
-    return ' '.join(f'{byte:02x}' for byte in byte_string)
+    return ''.join(f'\\x{byte:02x}' for byte in byte_string)
 
-def validate_header(bytes_data: bytes, header_data: bytes) -> None:
-    if bytes_data != header_data:
-        raise Exception(f"Mismatched byte header: {bytes_to_hex(bytes_data)}, {bytes_to_hex(header_data)}")
+def validate_bytes(bytes_data: bytes, valid_data: bytes) -> bytes:
+    if bytes_data != valid_data:
+        raise Exception(f"Mismatched byte header: {bytes_to_hex(bytes_data)}, {bytes_to_hex(valid_data)}")
+    return bytes_data
 
-def read_format(file: BufferedReader, format: str):
+def read_vtbf(file: str) -> list[bytes]:
+    chunks = []
+    file_size = os.path.getsize(file)
+    with open(file, 'rb') as f:
+        _magic = validate_bytes(f.read(8), b'\x56\x54\x42\x46\x10\x00\x00\x00') #VTBF
+        _type = f.read(4)
+        _unknown = validate_bytes(f.read(4), b'\x01\x00\x00\x4c')
+        while f.tell() != file_size:
+            _header = validate_bytes(f.read(4), b'\x76\x74\x63\x30')
+            chunk_size = struct.unpack("<I", f.read(4))[0]
+            chunk = f.read(chunk_size)
+            chunks.append(chunk)
+    return chunks
+
+def write_vtbf(output_file: str, chunks: list[bytes], type: str) -> None:
+    with open(output_file, 'wb') as f:
+        f.write(b'\x56\x54\x42\x46\x10\x00\x00\x00') #VTBF
+        f.write(type.encode('utf-8'))
+        f.write(b'\x01\x00\x00\x4c')
+        for chunk in chunks:
+            f.write(b'\x76\x74\x63\x30')
+            f.write(struct.pack("<I", len(chunk)))
+            f.write(chunk)
+
+def read_property(format: str, file: BytesIO):
     if format == 'string':
         string_size = int.from_bytes(file.read(1))
         value = file.read(string_size).decode('utf-8')
-    elif format in {'4B', '<HHHH', '<ff', '<fff'}:
+    elif len(format) > 1:
         value = NoIndent(struct.unpack(format, file.read(struct.calcsize(format))))
-    elif format == 'B':
-        value = int.from_bytes(file.read(1))
     else:
         value = struct.unpack(format, file.read(struct.calcsize(format)))[0]
     return value
 
-def process_fields(file: BufferedReader, data: Any) -> dict:
-    for field_name, field_obj in data.__dataclass_fields__.items():
-        if isinstance(getattr(data, field_name), Variable):
-            while True:
-                vari = getattr(data, field_name)
-                object_type = struct.unpack("<H", file.read(2))[0]
-                name, format = vari.input_map[object_type]
-                value = read_format(file, format)
-                vari.output_map[name] = value
-                setattr(data, name, value)
-                if name in {"KeyValue_Color_RGBA", "OutParam"}:
-                    break
-            result = data.__dict__
-            del result[field_name]
-            return result
-        header_bytes = field_obj.metadata["header"]
-        format = field_obj.metadata["format"]
-        validate_header(file.read(len(header_bytes)), header_bytes)
-        if isinstance(getattr(data, field_name), list):
-            value = []
-            length = field_obj.metadata["length"]
-            for i in range(length):
-                item_size = struct.calcsize(format)
-                item_bytes = file.read(item_size)
-                item_value = struct.unpack(format, item_bytes)
-                if len(item_value) == 1:
-                    value.append(item_value[0])
-                else:
-                    value.append(NoIndent(item_value))
-                if i != length-1:
-                    validate_header(file.read(len(header_bytes)), header_bytes)
-        else:
-            value = read_format(file, format)
-        setattr(data, field_name, value)
-    return data.__dict__
+def read_property_type(f: BytesIO) -> str:
+    type_byte = int.from_bytes(f.read(1))
+    format = PropertyType(type_byte & 0x3F)
+    has_dim1, has_dim2 = type_byte & 0x40, type_byte & 0x80
+    if has_dim1 and has_dim2:
+        raise Exception("Don't use this surfboard")
+    if has_dim1:
+        extra = int.from_bytes(f.read(1))
+        return DATA_MAP[format] * (2 + extra)
+    return DATA_MAP[format]
 
-def unpack_surfboard(input_file) -> dict:
+def read_properties(properties_len: int, file: BytesIO, type):
+    property_dict = dict()
+    for i in range(properties_len):
+        srd_property = int.from_bytes(file.read(1))
+        srd_property_type = read_property_type(file)
+        property_name = SRD_DICT[srd_property][0]
+        print(property_name)
+        if property_name in property_dict:
+            if not isinstance(property_dict[property_name], list):
+                property_dict[property_name] = [property_dict[property_name]]
+            property_dict[property_name].append(read_property(srd_property_type, file))
+        else:
+            property_dict[property_name] = read_property(srd_property_type, file)
+    return property_dict
+
+def build_tree_from_tuples(data):
+    stack = []
+    for i in range(len(data)):
+        curr_node, curr_children, type = data[i]
+
+        if not stack:
+            stack.append([curr_node, curr_children, type])
+        else:
+            curr_child, num_children, curr_type = stack[-1]
+
+            child_name = CHILD_MAPPING.get(type, type)
+            if child_name not in curr_child:
+                curr_child[child_name] = []
+            if isinstance(curr_node, list):
+                curr_child[child_name] = curr_node
+            else:
+                curr_child[child_name].append(curr_node)
+
+            if num_children == 1:
+                stack.pop()
+            else:
+                stack[-1][1] -= 1
+
+            if curr_children > 0:
+                stack.append([curr_node, curr_children, type])
+    return data[0][0]
+
+def build_tuples_from_tree(tree):
+    result = []
+
+    def traverse_tree(node, node_type=None):
+        if not isinstance(node, dict):
+            # Leaf node with no children
+            result.append((node, 0, node_type or "DATA"))
+            return
+
+        # Count total children across all child types
+        total_children = 0
+        for child_type, children in node.items():
+            if isinstance(children, list):
+                total_children += len(children)
+
+        # Create a copy of the node without its children
+        node_data = {
+            k: v
+            for k, v in node.items()
+            if k not in CHILD_MAPPING.inverse
+        }
+
+        # Add current node to result
+        type_code = node_type or "SRCK"  # Default to SRCK for root
+        result.append((node_data, total_children, type_code))
+
+        # Process all child types and their nodes
+        for child_type, children in node.items():
+            type_code = CHILD_MAPPING.inverse.get(child_type, child_type)
+            if isinstance(children, list) and child_type in CHILD_MAPPING.inverse:
+                for child in children:
+                    traverse_tree(child, type_code)
+
+
+    traverse_tree(tree)
+    return result
+
+def unpack_surfboard(chunks: list[bytes]):
     """
-    Unpack a compiled .sbscene file into a dictionary.
+    Unpack VTBF chunk bytes into a dictionary.
 
     Parameters
     ----------
@@ -358,45 +277,147 @@ def unpack_surfboard(input_file) -> dict:
     The file header must match a valid sbscene file to process
     the data.
 
-    The function will crash if a bad input file path is provided
+    The function will crash bytes are not provided in valid VTBF structure
 
     Examples
     --------
-    >>> unpack_surfboard("/path/to/file/awesome.sbscene")
+    >>> unpack_surfboard(vtbf_chunks)
     """
-    file_size = os.path.getsize(input_file)
-    chunker = ChunkProcessor()
-    process_definitions = {
-        'PROJ': chunker.process_PROJ,
-        'SCN ': chunker.process_SCN,
-        'LAYR': chunker.process_LAYR,
-        'CAST': chunker.process_CAST,
-        'NODE': chunker.process_NODE,
-        'TRS2': chunker.process_TRS2,
-        'DATA': chunker.process_DATA,
-        'CSLI': chunker.process_CSLI,
-        'CIMG': chunker.process_CIMG,
-        'TEXT': chunker.process_TEXT,
-        'CREF': chunker.process_CREF,
-        'NCAT': chunker.process_NCAT,
-        'CATR': chunker.process_CATR,
-        'ANIM': chunker.process_ANIM,
-        'MOT ': chunker.process_MOT,
-        'TRK ': chunker.process_TRK,
-        'KEY ': chunker.process_KEY,
-        'TEXL': chunker.process_TEXL,
-        'TEX ': chunker.process_TEX,
-        'CROP': chunker.process_CROP,
-        'CAM ': chunker.process_CAM
-    }
+    srd_list = []
+    for chunk in chunks:
+        srd_dict = dict()
+        f = BytesIO(chunk)
+        type = f.read(4).decode()
+        children = struct.unpack("<H", f.read(2))[0]
+        properties = struct.unpack("<H", f.read(2))[0]
+        if type in {"NODE", "TRS2", "NCAT"}:
+            start_marker = b'\xFC\x00'
+            separator = b'\xFE\x00'
+            end_marker = b'\xFD\x00'
+            start_index = chunk.find(start_marker)
+            end_index = chunk.find(end_marker)
+            list_data = chunk[start_index + len(start_marker):end_index]
+            items = list_data.split(separator)
+            type_dict_list = []
+            properties = int((properties - len(items) - 1) / len(items))
+            for item in items:
+                type_dict_list.append(read_properties(properties, BytesIO(item), type))
+            srd_dict = type_dict_list
+        else:
+            srd_dict = read_properties(properties, f, type)
+        srd_list.append([srd_dict, children, type])
+    return build_tree_from_tuples(srd_list[:53])
 
-    with open(input_file, "rb") as f:
-        _signature = f.read(32)
-        while f.tell() != file_size:
-            _header = f.read(4)
-            chunk_size = struct.unpack("<I", f.read(4))[0] - 8
-            chunk_type = f.read(4).decode()
-            _chunkIndex = read_format(f, '<H')
-            _chunkParameterCount = read_format(f, '<H')
-            process_definitions[chunk_type](f, chunk_size)
-    return chunker.get_dict()
+def get_dict_item(tuple_dict, element):
+    for key_tuple, value in tuple_dict.inverse.items():
+        if key_tuple[0] == element:
+            return value, key_tuple[1]
+    return 0, 0
+
+def repack_surfboard(json_file, output):
+    srd_list = build_tuples_from_tree(json_file)
+    srd_chunks = []
+    types_seen = set()
+    node_chunk = b''
+    node_added = False
+    trs2_chunk = b''
+    trs2_added = False
+    ncat_chunk = b''
+    ncat_added = False
+    for chunk in srd_list:
+        srd_chunk = b''
+        data, num_children, type = chunk
+        is_array = type in {'NODE', 'NCAT', "TRS2"}
+        if is_array:
+            if type not in types_seen:
+                types_seen.add(type)
+                srd_chunk += type.encode('utf-8')
+                srd_chunk += struct.pack("<H", num_children)
+                srd_chunk += struct.pack("<H", len(data))
+                srd_chunk += b'\xFC\x00'
+            for key, value in data.items():
+                srd_property, property_type = get_dict_item(SRD_DICT, key)
+                srd_chunk += int.to_bytes(srd_property)
+                srd_chunk += int.to_bytes(property_type)
+                if isinstance(value, str):
+                    srd_chunk += int.to_bytes(len(value))
+                    srd_chunk += value.encode('ansi')
+                elif isinstance(value, list):
+                    if isinstance(value[0], float):
+                        srd_chunk = srd_chunk[:-1]
+                        srd_chunk += int.to_bytes(property_type | 0x40)
+                        srd_chunk += int.to_bytes(len(value) - 2)
+                        for val in value:
+                            srd_chunk += struct.pack('f', val)
+                    elif isinstance(value[0], list):
+                        srd_chunk = srd_chunk[:-2]
+                        for val_list in value:
+                            srd_chunk += int.to_bytes(srd_property)
+                            srd_chunk += int.to_bytes(property_type)
+                            for val in val_list:
+                                srd_chunk += int.to_bytes(val)
+                    else:
+                        for val in value:
+                            srd_chunk += int.to_bytes(val)
+                else:
+                    srd_chunk += struct.pack(DATA_MAP[PropertyType(property_type)], value)
+            srd_chunk += b'\xFE\x00'
+            if type == 'NODE':
+                node_chunk += srd_chunk
+            elif type == 'TRS2':
+                trs2_chunk += srd_chunk
+            elif type == 'NCAT':
+                ncat_chunk += srd_chunk
+        else:
+            if node_chunk != b'' and not node_added:
+                node_chunk = node_chunk[:-2]
+                node_chunk += b'\xFD\x00'
+                srd_chunks.append(node_chunk)
+                node_added = True
+            if trs2_chunk != b'' and not trs2_added:
+                trs2_chunk = trs2_chunk[:-2]
+                trs2_chunk += b'\xFD\x00'
+                srd_chunks.append(trs2_chunk)
+                trs2_added = True
+            if ncat_chunk != b'' and not ncat_added:
+                ncat_chunk = ncat_chunk[:-2]
+                ncat_chunk += b'\xFD\x00'
+                srd_chunks.append(ncat_chunk)
+                ncat_added = True
+            srd_chunk += type.encode('utf-8')
+            srd_chunk += struct.pack("<H", num_children)
+            srd_chunk += struct.pack("<H", len(data))
+            for key, value in data.items():
+                srd_property, property_type = get_dict_item(SRD_DICT, key)
+                srd_chunk += int.to_bytes(srd_property)
+                srd_chunk += int.to_bytes(property_type)
+                if isinstance(value, str):
+                    srd_chunk += int.to_bytes(len(value))
+                    srd_chunk += value.encode('ansi')
+                elif isinstance(value, list):
+                    if all(isinstance(val, float) for val in value):
+                        srd_chunk += int.to_bytes(len(value))
+                        for val in value:
+                            srd_chunk += struct.pack('f', val)
+                    else:
+                        if key in {'CropIndex', 'CropRefCount'}:
+                            srd_chunk = srd_chunk[:-2]
+                            for val in value:
+                                srd_chunk += int.to_bytes(srd_property)
+                                srd_chunk += int.to_bytes(property_type)
+                                srd_chunk += struct.pack('H', val)
+                        elif key == 'CropRef':
+                            srd_chunk += int.to_bytes(len(value) - 2)
+                            srd_chunk += int.to_bytes(value[0])
+                            srd_chunk += int.to_bytes(value[0])
+                            srd_chunk += struct.pack('H', value[1])
+                            srd_chunk += struct.pack('H', value[2])
+                        else:
+                            for val in value:
+                                srd_chunk += int.to_bytes(val)
+                elif isinstance(value, float):
+                    srd_chunk += struct.pack(DATA_MAP[PropertyType.Float], value)
+                else:
+                    srd_chunk += struct.pack(DATA_MAP[PropertyType(property_type)], value)
+            srd_chunks.append(srd_chunk)
+    write_vtbf(output, srd_chunks, 'SRFF')
