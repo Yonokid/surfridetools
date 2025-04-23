@@ -306,7 +306,7 @@ def unpack_surfboard(chunks: list[bytes]):
         else:
             srd_dict = read_properties(properties, f, type)
         srd_list.append([srd_dict, children, type])
-    return build_tree_from_tuples(srd_list[:53])
+    return build_tree_from_tuples(srd_list)
 
 def get_dict_item(tuple_dict, element):
     for key_tuple, value in tuple_dict.inverse.items():
