@@ -11,7 +11,7 @@ from save_json import NoIndent
 class PropertyType(IntEnum):
     None_ = 0x00  # 0 bytes
     Bool = 0x01
-    AnsiString = 0x02  # n bytes
+    String = 0x02  # n bytes
     Char = 0x03
     UChar = 0x04
     Short = 0x05
@@ -27,13 +27,15 @@ class PropertyType(IntEnum):
 
     IllegalType = 0x0F
 
+
 SRD_DICT = bidict({
     0x00: ("SceneCount", PropertyType.UShort),
     0x01: ("TexListCount", PropertyType.UShort),
-    0x03: ("Name", PropertyType.AnsiString),
+    0x03: ("Name", PropertyType.String),
     0x04: ("BackColor", PropertyType.ARGB8888),
     0x05: ("FontCount", PropertyType.UShort),
     0x06: ("CommentLength", PropertyType.Short),
+    0x07: ("Comment", PropertyType.String),
     0x0E: ("AttributeCount", PropertyType.UShort),
     0x10: ("LayerCount", PropertyType.UShort),
     0x11: ("CameraCount", PropertyType.UShort),
@@ -81,7 +83,7 @@ SRD_DICT = bidict({
     0x5D: ("InParam", PropertyType.Float),
     0x5E: ("OutParam", PropertyType.Float),
     0x60: ("LayerCount2", PropertyType.UShort),
-    0x61: ("TextureFileName", PropertyType.AnsiString),
+    0x61: ("TextureFileName", PropertyType.String),
     0x62: ("TextureFlags", PropertyType.ULong),
     0x63: ("CropCount", PropertyType.UShort),
     0x65: ("Rectangle", PropertyType.Short),
@@ -121,22 +123,25 @@ DATA_MAP = {
     PropertyType.Double: 'd',
     PropertyType.ARGB8888: '4B',
     PropertyType.Angle: 'I',
-    PropertyType.AnsiString: 'string',
+    PropertyType.String: 'string',
 }
+
 
 def bytes_to_hex(byte_string: bytes) -> str:
     return ''.join(f'\\x{byte:02x}' for byte in byte_string)
+
 
 def validate_bytes(bytes_data: bytes, valid_data: bytes) -> bytes:
     if bytes_data != valid_data:
         raise Exception(f"Mismatched byte header: {bytes_to_hex(bytes_data)}, {bytes_to_hex(valid_data)}")
     return bytes_data
 
+
 def read_vtbf(file: str) -> list[bytes]:
     chunks = []
     file_size = os.path.getsize(file)
     with open(file, 'rb') as f:
-        _magic = validate_bytes(f.read(8), b'\x56\x54\x42\x46\x10\x00\x00\x00') #VTBF
+        _magic = validate_bytes(f.read(8), b'\x56\x54\x42\x46\x10\x00\x00\x00')  # VTBF
         _type = f.read(4)
         _unknown = validate_bytes(f.read(4), b'\x01\x00\x00\x4c')
         while f.tell() != file_size:
@@ -146,28 +151,30 @@ def read_vtbf(file: str) -> list[bytes]:
             chunks.append(chunk)
     return chunks
 
+
 def write_vtbf(output_file: str, chunks: list[bytes], type: str) -> None:
     with open(output_file, 'wb') as f:
-        f.write(b'\x56\x54\x42\x46\x10\x00\x00\x00') #VTBF
-        f.write(type.encode('utf-8'))
+        f.write(b'\x56\x54\x42\x46\x10\x00\x00\x00')  # VTBF
+        f.write(type.encode('shift_jis'))
         f.write(b'\x01\x00\x00\x4c')
         for chunk in chunks:
             f.write(b'\x76\x74\x63\x30')
             f.write(struct.pack("<I", len(chunk)))
             f.write(chunk)
 
+
 def read_property(format: str, file: BytesIO):
     if format == 'string':
         string_size = int.from_bytes(file.read(1))
-        value = file.read(string_size).decode('utf-8')
+        value = file.read(string_size).decode('shift_jis')
     elif len(format) > 1:
         value = NoIndent(struct.unpack(format, file.read(struct.calcsize(format))))
     else:
         value = struct.unpack(format, file.read(struct.calcsize(format)))[0]
     return value
 
-def read_property_type(f: BytesIO) -> str:
-    type_byte = int.from_bytes(f.read(1))
+
+def read_property_type(type_byte: int, f: BytesIO) -> str:
     format = PropertyType(type_byte & 0x3F)
     has_dim1, has_dim2 = type_byte & 0x40, type_byte & 0x80
     if has_dim1 and has_dim2:
@@ -177,13 +184,26 @@ def read_property_type(f: BytesIO) -> str:
         return DATA_MAP[format] * (2 + extra)
     return DATA_MAP[format]
 
-def read_properties(properties_len: int, file: BytesIO, type):
+
+def read_properties(file: BytesIO):
     property_dict = dict()
-    for i in range(properties_len):
-        srd_property = int.from_bytes(file.read(1))
-        srd_property_type = read_property_type(file)
-        property_name = SRD_DICT[srd_property][0]
+    while file.tell() < file.getbuffer().nbytes:
+        property_header = file.read(2)
+        if (property_header[0] == 0xFE or property_header[0] == 0xFD) and property_header[1] == 0x00:
+            print(f"stop reading property: 0x{property_header[0]:02X} 0x{property_header[1]:02X}")
+            break
+        srd_property = property_header[0]
+        srd_property_type = read_property_type(property_header[1], file)
+        property_name = f"<unknown_{srd_property_type}_property_{srd_property}>"
+        if srd_property in SRD_DICT:
+            property_name = SRD_DICT[srd_property][0]
         print(property_name)
+
+        # special deal with Comment
+        if property_name == "Comment":
+            if "CommentLength" in property_dict and property_dict["CommentLength"] > 0:
+                file.read(1)  # unknown byte before size byte, seems useless, just ignore
+
         if property_name in property_dict:
             if not isinstance(property_dict[property_name], list):
                 property_dict[property_name] = [property_dict[property_name]]
@@ -191,6 +211,7 @@ def read_properties(properties_len: int, file: BytesIO, type):
         else:
             property_dict[property_name] = read_property(srd_property_type, file)
     return property_dict
+
 
 def build_tree_from_tuples(data):
     stack = []
@@ -218,6 +239,7 @@ def build_tree_from_tuples(data):
             if curr_children > 0:
                 stack.append([curr_node, curr_children, type])
     return data[0][0]
+
 
 def build_tuples_from_tree(tree):
     result = []
@@ -252,9 +274,9 @@ def build_tuples_from_tree(tree):
                 for child in children:
                     traverse_tree(child, type_code)
 
-
     traverse_tree(tree)
     return result
+
 
 def unpack_surfboard(chunks: list[bytes]):
     """
@@ -292,27 +314,39 @@ def unpack_surfboard(chunks: list[bytes]):
         properties = struct.unpack("<H", f.read(2))[0]
         if type in {"NODE", "TRS2", "NCAT"}:
             start_marker = b'\xFC\x00'
-            separator = b'\xFE\x00'
             end_marker = b'\xFD\x00'
+
             start_index = chunk.find(start_marker)
-            end_index = chunk.find(end_marker)
+            end_index = chunk.rfind(end_marker)
+
             list_data = chunk[start_index + len(start_marker):end_index]
-            items = list_data.split(separator)
+
+            # those array count can get from another chunk's property named "CastCount"
+            # todo: maybe there is bytes used to describe the length of the array.
+            array_count = 0
+            layr_list = next((x for x in srd_list if x[2] == 'LAYR'), None)
+            if layr_list and isinstance(layr_list[0], dict):
+                cast_count = layr_list[0]['CastCount']
+                if cast_count is not None:
+                    array_count = int(cast_count)
+
             type_dict_list = []
-            properties = int((properties - len(items) - 1) / len(items))
-            for item in items:
-                type_dict_list.append(read_properties(properties, BytesIO(item), type))
+            item_data_reader = BytesIO(list_data)
+            for i in range(array_count):
+                type_dict_list.append(read_properties(item_data_reader))
             srd_dict = type_dict_list
         else:
-            srd_dict = read_properties(properties, f, type)
+            srd_dict = read_properties(f)
         srd_list.append([srd_dict, children, type])
     return build_tree_from_tuples(srd_list)
+
 
 def get_dict_item(tuple_dict, element):
     for key_tuple, value in tuple_dict.inverse.items():
         if key_tuple[0] == element:
             return value, key_tuple[1]
     return 0, 0
+
 
 def repack_surfboard(json_file, output):
     srd_list = build_tuples_from_tree(json_file)
@@ -331,7 +365,7 @@ def repack_surfboard(json_file, output):
         if is_array:
             if type not in types_seen:
                 types_seen.add(type)
-                srd_chunk += type.encode('utf-8')
+                srd_chunk += type.encode('shift_jis')
                 srd_chunk += struct.pack("<H", num_children)
                 srd_chunk += struct.pack("<H", len(data))
                 srd_chunk += b'\xFC\x00'
@@ -341,7 +375,7 @@ def repack_surfboard(json_file, output):
                 srd_chunk += int.to_bytes(property_type)
                 if isinstance(value, str):
                     srd_chunk += int.to_bytes(len(value))
-                    srd_chunk += value.encode('ansi')
+                    srd_chunk += value.encode('shift_jis')
                 elif isinstance(value, list):
                     if isinstance(value[0], float):
                         srd_chunk = srd_chunk[:-1]
@@ -384,7 +418,7 @@ def repack_surfboard(json_file, output):
                 ncat_chunk += b'\xFD\x00'
                 srd_chunks.append(ncat_chunk)
                 ncat_added = True
-            srd_chunk += type.encode('utf-8')
+            srd_chunk += type.encode('shift_jis')
             srd_chunk += struct.pack("<H", num_children)
             srd_chunk += struct.pack("<H", len(data))
             for key, value in data.items():
